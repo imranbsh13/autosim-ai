@@ -1,3 +1,15 @@
+# Unity generated - ignore everywhere in repo
+unity-project/AutoSimAI/Library/
+unity-project/AutoSimAI/Temp/
+unity-project/AutoSimAI/Logs/
+unity-project/AutoSimAI/obj/
+unity-project/AutoSimAI/UserSettings/
+unity-project/AutoSimAI/.vsconfig
+unity-project/AutoSimAI/*.csproj
+unity-project/AutoSimAI/*.sln
+unity-project/AutoSimAI/.vscode/
+
+
 # This .gitignore file should be placed at the root of your Unity project directory
 #
 # Get latest from https://github.com/github/gitignore/blob/main/Unity.gitignore
