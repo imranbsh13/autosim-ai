@@ -1,3 +1,15 @@
+# Large asset store package files
+unity-project/AutoSimAI/Assets/Fantastic City Generator/
+unity-project/AutoSimAI/Assets/RealisticCarControllerV3/
+unity-project/AutoSimAI/Assets/UTS_PRO2020/
+
+# Large binary files
+*.psd
+*.hdr
+*.hdri
+*.exr
+*.psd
+
 # Unity generated - ignore everywhere in repo
 unity-project/AutoSimAI/Library/
 unity-project/AutoSimAI/Temp/
