@@ -131,17 +131,16 @@ class TrackedObject:
         }
 
     def _estimate_distance(self, bbox_height_norm):
-        """
-        Estimate distance from bounding box height.
-        Uses pinhole camera approximation:
-        distance ≈ reference_constant / bbox_height
-        Tuned empirically for our Unity camera FOV.
-        """
         if bbox_height_norm < 0.001:
             return 999.0
-        reference = 0.12 if self.class_id == 0 else 0.08
+        if self.class_id == 0:
+            # Vehicle: bbox_height 0.15 ≈ 10m, 0.05 ≈ 30m
+            reference = 1.5
+        else:
+            # Pedestrian
+            reference = 0.8
         distance = reference / bbox_height_norm
-        return max(1.0, min(200.0, distance))
+        return max(2.0, min(100.0, distance))
 
 
 class KalmanFusion:

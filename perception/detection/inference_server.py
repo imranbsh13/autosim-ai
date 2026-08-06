@@ -21,6 +21,7 @@ sys.path.insert(0, detection_dir)
 
 from lane_detector import LaneDetector
 from fusion.kalman_fusion import KalmanFusion
+from autonomous.autonomous_controller import AutonomousController
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
@@ -47,25 +48,13 @@ class PerceptionServer:
     def __init__(self):
         print("[PerceptionServer] Initialising...")
 
-        # ── YOLO MODEL ────────────────────────────────────
+        # 1 — Model
         print(f"[PerceptionServer] Loading model: {MODEL_PATH}")
         self.model = YOLO(MODEL_PATH)
         self.model.to('cuda')
         print("[PerceptionServer] Model loaded on GPU")
 
-        # ── LANE DETECTOR ─────────────────────────────────
-        self.lane_detector = LaneDetector()
-        print("[PerceptionServer] Lane detector initialised")
-
-        # Kalman fusion
-        self.fusion = KalmanFusion(
-            max_age=5,
-            min_hits=2,
-            iou_threshold=0.25
-        )
-        print("[PerceptionServer] Kalman fusion initialised")
-
-        # ── CLASS DEFINITIONS ─────────────────────────────
+        # Class definitions
         self.class_names = {
             0: "vehicle",
             1: "pedestrian",
@@ -79,7 +68,16 @@ class PerceptionServer:
             3: (255, 0, 0),    # traffic_light — blue
         }
 
-        # ── NETWORK ───────────────────────────────────────
+        # 2 — Lane detector
+        self.lane_detector = LaneDetector()
+        print("[PerceptionServer] Lane detector initialised")
+
+        # 3 — Fusion
+        self.fusion = KalmanFusion(
+            max_age=5, min_hits=1, iou_threshold=0.25)
+        print("[PerceptionServer] Kalman fusion initialised")
+
+        # 4 — Network (must be before controller)
         self.recv_socket = socket.socket(
             socket.AF_INET, socket.SOCK_DGRAM)
         self.recv_socket.bind(("0.0.0.0", RECEIVE_PORT))
@@ -90,7 +88,17 @@ class PerceptionServer:
             socket.AF_INET, socket.SOCK_DGRAM)
         print(f"[PerceptionServer] Sending to {UNITY_IP}:{SEND_PORT}")
 
-        # ── STATE ─────────────────────────────────────────
+        # 5 — Controller (after send_socket exists)
+        self.controller = AutonomousController(
+            send_socket=self.send_socket,
+            unity_ip=UNITY_IP,
+            unity_port=SEND_PORT
+        )
+        self.controller.set_mode(
+            AutonomousController.MODE_AUTONOMOUS)
+        print("[PerceptionServer] Autonomous controller initialised")
+
+        # 6 — State
         self.running = False
         self.frame_count = 0
         self.total_inference_time = 0.0
@@ -163,6 +171,9 @@ class PerceptionServer:
                         "h":  round(h, 4),
                     }
                 })
+            if detections:
+                heights = [d["bbox"]["h"] for d in detections]
+                print(f"[DEBUG] bbox heights: {[f'{h:.4f}' for h in heights]}")
 
         return detections, inference_ms
 
@@ -273,6 +284,11 @@ class PerceptionServer:
                 confirmed_tracks, scene_state = \
                     self.fusion.update(detections, telemetry)
 
+                # ── AUTONOMOUS CONTROL ─────────────────────────
+                control = self.controller.compute(
+                    scene_state, lane_offset, lane_detected)
+                self.controller.send_control(control)
+
                 # ── SEND TO UNITY ──────────────────────────
                 self.send_detections(
                     detections, telemetry, inference_ms,
@@ -304,22 +320,20 @@ class PerceptionServer:
                 # ── CONSOLE LOG EVERY 30 FRAMES ────────────
                 if self.frame_count % 30 == 0:
                     avg_inf = self.total_inference_time / self.frame_count
-                    speed = telemetry.get("speed", 0)
-                    lane_str = (f"offset={lane_offset:.3f}"
-                                if lane_detected else "no lane")
+                    speed   = telemetry.get("speed", 0)
                     closest = scene_state.get(
                         "closest_vehicle_distance", 999)
-                    emergency = scene_state.get("emergency_brake", False)
                     print(f"[Frame {self.frame_count:05d}] "
                         f"FPS: {current_fps:.1f} | "
                         f"Inf: {inference_ms:.1f}ms | "
                         f"Det: {len(detections)} | "
                         f"Tracks: {scene_state.get('total_tracked',0)} | "
                         f"Closest: {closest:.1f}m | "
-                        f"Lane: {lane_str} | "
-                        f"BRAKE: {emergency}")
+                        f"Steer: {control['steering']:+.3f} | "
+                        f"Thr: {control['throttle']:.2f} | "
+                        f"Brk: {control['brake']:.2f}")
 
-            except (socket.timeout, TimeoutError):
+            except (socket.timeout, TimeoutError, OSError):
                 print("[PerceptionServer] Waiting for Unity connection...")
                 continue
 
