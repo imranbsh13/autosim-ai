@@ -5,7 +5,22 @@ import cv2
 import numpy as np
 import json
 from ultralytics import YOLO
+
+
+import sys
+import os
+
+# Add perception/ to path so we can import from sibling folders
+perception_dir = os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))
+sys.path.insert(0, perception_dir)
+
+# Add perception/detection/ to path for same-folder imports
+detection_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, detection_dir)
+
 from lane_detector import LaneDetector
+from fusion.kalman_fusion import KalmanFusion
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
@@ -41,6 +56,14 @@ class PerceptionServer:
         # ── LANE DETECTOR ─────────────────────────────────
         self.lane_detector = LaneDetector()
         print("[PerceptionServer] Lane detector initialised")
+
+        # Kalman fusion
+        self.fusion = KalmanFusion(
+            max_age=5,
+            min_hits=2,
+            iou_threshold=0.25
+        )
+        print("[PerceptionServer] Kalman fusion initialised")
 
         # ── CLASS DEFINITIONS ─────────────────────────────
         self.class_names = {
@@ -194,7 +217,8 @@ class PerceptionServer:
         return frame
 
     def send_detections(self, detections, telemetry, inference_ms,
-                        lane_offset=0.0, lane_detected=False):
+                    lane_offset=0.0, lane_detected=False,
+                    scene_state=None):
         """Send detection + lane results to Unity as JSON over UDP."""
         payload = {
             "frame_id":        self.frame_count,
@@ -203,6 +227,7 @@ class PerceptionServer:
             "detections":      detections,
             "lane_offset":     round(lane_offset, 4),
             "lane_detected":   lane_detected,
+            "scene_state":     scene_state or {},
             "telemetry_echo":  telemetry,
         }
 
@@ -244,10 +269,14 @@ class PerceptionServer:
                 lane_frame, lane_offset, lane_detected = \
                     self.lane_detector.detect(frame.copy())
 
+                # ── SENSOR FUSION ──────────────────────────────
+                confirmed_tracks, scene_state = \
+                    self.fusion.update(detections, telemetry)
+
                 # ── SEND TO UNITY ──────────────────────────
                 self.send_detections(
                     detections, telemetry, inference_ms,
-                    lane_offset, lane_detected)
+                    lane_offset, lane_detected, scene_state)
 
                 # ── COUNTERS ───────────────────────────────
                 self.frame_count += 1
@@ -274,20 +303,23 @@ class PerceptionServer:
 
                 # ── CONSOLE LOG EVERY 30 FRAMES ────────────
                 if self.frame_count % 30 == 0:
-                    avg_inf = (self.total_inference_time
-                               / self.frame_count)
+                    avg_inf = self.total_inference_time / self.frame_count
                     speed = telemetry.get("speed", 0)
                     lane_str = (f"offset={lane_offset:.3f}"
                                 if lane_detected else "no lane")
+                    closest = scene_state.get(
+                        "closest_vehicle_distance", 999)
+                    emergency = scene_state.get("emergency_brake", False)
                     print(f"[Frame {self.frame_count:05d}] "
-                          f"FPS: {current_fps:.1f} | "
-                          f"Inf: {inference_ms:.1f}ms "
-                          f"(avg: {avg_inf:.1f}ms) | "
-                          f"Det: {len(detections)} | "
-                          f"Lane: {lane_str} | "
-                          f"Speed: {speed:.1f} m/s")
+                        f"FPS: {current_fps:.1f} | "
+                        f"Inf: {inference_ms:.1f}ms | "
+                        f"Det: {len(detections)} | "
+                        f"Tracks: {scene_state.get('total_tracked',0)} | "
+                        f"Closest: {closest:.1f}m | "
+                        f"Lane: {lane_str} | "
+                        f"BRAKE: {emergency}")
 
-            except socket.timeout:
+            except (socket.timeout, TimeoutError):
                 print("[PerceptionServer] Waiting for Unity connection...")
                 continue
 
