@@ -5,6 +5,13 @@
 Built as an independent portfolio project targeting Computer Vision, Perception Engineering, and AI Engineer roles. Demonstrates a complete end-to-end pipeline — from synthetic training data generation through deep learning model training, real-time sensor fusion, autonomous control logic, and on-device VR deployment on Oculus Quest 2.
 
 > **Live demo:** Oculus Quest 2 APK running YOLOv8 at 8.4ms on-device via Unity Sentis — no Python server, no cloud, fully standalone.
+## Demo
+
+https://github.com/imranbsh13/autosim-ai/releases/download/v1.0/Autosim.AI.Demo.mp4
+
+*Autonomous driving pipeline — YOLOv8 detection (green/red boxes), lane keeping (blue/red lines), Kalman fusion tracking, BEV minimap (bottom right), stereo depth map (bottom left). Running at 10-12 FPS on RTX 4070 Laptop.*
+
+![AutoSim AI Demo](docs/preview.png)
 
 ---
 
@@ -44,7 +51,7 @@ Built as an independent portfolio project targeting Computer Vision, Perception 
 - [x] **Phase 2** — Synthetic data generation pipeline (3,000 samples → 5,747 augmented)
 - [x] **Phase 3** — Python AI perception pipeline (YOLOv8 + lane detection + Kalman + autonomous controller)
 - [x] **Phase 4** — Oculus Quest 2 VR deployment (Unity Sentis on-device inference)
-- [ ] **Phase 4.5** — Stereo vision depth estimation + Bird's Eye View projection *(in progress)*
+- [x] **Phase 4.5** — Stereo vision depth estimation (OpenCV StereoBM, 6cm baseline) + Bird's Eye View homography projection
 
 ---
 
@@ -63,6 +70,8 @@ Built as an independent portfolio project targeting Computer Vision, Perception 
 | Training classes | vehicle, pedestrian, traffic_sign, traffic_light |
 | Pipeline throughput | 10–12 FPS end-to-end |
 | Unity editor FPS | 60+ FPS |
+| Stereo depth accuracy | ~12.7m geometric vs ~13.3m Kalman |
+| BEV projection | Homography projection with IoU-tracked objects |
 
 ---
 
@@ -191,11 +200,11 @@ Quest 2's Snapdragon XR2 cannot run HDRP. URP supports all three asset packages 
 
 | Limitation | Planned fix |
 |---|---|
-| Pedestrian recall 0.60 | Collect closer-range pedestrian footage |
-| Traffic sign/light detection | Label signs in Unity scene, retrain |
-| Distance estimation empirical | Phase 4.5: stereo vision for geometric depth |
-| No BEV map | Phase 4.5: homography projection minimap |
-| Lane detection fails on curves | Upgrade to segmentation-based lane model |
+| Pedestrian recall 0.60         | Collect closer-range pedestrian footage      |
+| Traffic sign/light detection   | Label signs in Unity scene, retrain          |
+| Lane detection fails on curves | Upgrade to segmentation-based lane model     |
+| Stereo depth on Quest 2        | Port StereoDepth pipeline to Unity Sentis    |
+
 
 ---
 
