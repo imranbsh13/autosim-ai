@@ -17,6 +17,8 @@ from ultralytics import YOLO
 from lane_detector import LaneDetector
 from fusion.kalman_fusion import KalmanFusion
 from autonomous.autonomous_controller import AutonomousController
+from stereo_depth import StereoDepth
+from bev_projection import BEVProjection
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
@@ -24,6 +26,7 @@ from autonomous.autonomous_controller import AutonomousController
 MODEL_PATH     = r"C:\Projects\autosim-ai\models\autosim_v1\weights\best.pt"
 RECEIVE_PORT   = 5006
 SEND_PORT      = 5008
+STEREO_PORT    = 5009
 UNITY_IP       = "127.0.0.1"
 BUFFER_SIZE    = 65535
 CONF_THRESHOLD = 0.47
@@ -33,29 +36,31 @@ PREVIEW_PATH   = r"C:\Projects\autosim-ai\perception\preview.jpg"
 
 class PerceptionServer:
     """
-    Real-time perception server.
+    Real-time perception server — Phase 4.5 with stereo + BEV.
 
     Pipeline per frame:
-    1. Receive JPEG + telemetry from Unity (port 5006)
-    2. YOLOv8 object detection
-    3. OpenCV lane detection
-    4. Kalman filter sensor fusion
-    5. Autonomous controller → control signals
-    6. Send detections + control back to Unity (port 5007)
-    7. Save annotated preview image every 30 frames
+    1.  Receive RGB frame + telemetry (port 5006)
+    2.  Receive stereo frame (port 5009)
+    3.  YOLOv8 object detection
+    4.  OpenCV lane detection
+    5.  Stereo depth estimation
+    6.  Kalman filter sensor fusion
+    7.  Autonomous controller
+    8.  Send payload to Unity (port 5008)
+    9.  Save annotated preview every 30 frames
     """
 
     def __init__(self):
         print("[PerceptionServer] Initialising...")
 
         # ── MODEL ─────────────────────────────────────────
-        print(f"[PerceptionServer] Loading model: {MODEL_PATH}")
+        print(f"[PerceptionServer] Loading model...")
         self.model = YOLO(MODEL_PATH)
         self.model.to('cuda')
         print("[PerceptionServer] Model loaded on GPU")
 
         self.class_names = {
-            0: "vehicle",    1: "pedestrian",
+            0: "vehicle",      1: "pedestrian",
             2: "traffic_sign", 3: "traffic_light"
         }
         self.class_colors = {
@@ -73,84 +78,78 @@ class PerceptionServer:
             max_age=5, min_hits=1, iou_threshold=0.25)
         print("[PerceptionServer] Kalman fusion initialised")
 
+        self.stereo = StereoDepth(
+            baseline=0.06, fov_degrees=60,
+            image_width=640)
+        print("[PerceptionServer] Stereo depth initialised")
+
+        self.bev = BEVProjection(
+            image_width=640, image_height=360,
+            bev_width=280, bev_height=360)
+        print("[PerceptionServer] BEV projection initialised")
+
         # ── NETWORK ───────────────────────────────────────
+        # Main receive
         self.recv_socket = socket.socket(
             socket.AF_INET, socket.SOCK_DGRAM)
         self.recv_socket.bind(("0.0.0.0", RECEIVE_PORT))
         self.recv_socket.settimeout(5.0)
-        print(f"[PerceptionServer] Listening on port "
-              f"{RECEIVE_PORT}")
+        print(f"[PerceptionServer] Listening on "
+              f"port {RECEIVE_PORT}")
 
+        # Send
         self.send_socket = socket.socket(
             socket.AF_INET, socket.SOCK_DGRAM)
         print(f"[PerceptionServer] Sending to "
               f"{UNITY_IP}:{SEND_PORT}")
 
+        # Stereo receive
+        self.stereo_socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM)
+        self.stereo_socket.bind(("0.0.0.0", STEREO_PORT))
+        self.stereo_socket.settimeout(0.01)
+        print(f"[PerceptionServer] Stereo on "
+              f"port {STEREO_PORT}")
+
         # ── AUTONOMOUS CONTROLLER ─────────────────────────
         self.controller = AutonomousController()
         self.controller.set_mode(
             AutonomousController.MODE_AUTONOMOUS)
-        print("[PerceptionServer] Autonomous controller "
-              "initialised")
+        print("[PerceptionServer] Controller initialised")
 
         # ── STATE ─────────────────────────────────────────
-        self.running = False
-        self.frame_count = 0
+        self.running              = False
+        self.frame_count          = 0
         self.total_inference_time = 0.0
+        self.stereo_frame         = None
 
         print("[PerceptionServer] Ready")
 
     def decode_frame(self, data):
         """
         Decode UDP packet → (frame, telemetry).
-
-        Packet format:
-        [4 bytes: telemetry JSON length, big-endian uint32]
-        [N bytes: telemetry JSON string]
-        [remaining: JPEG bytes]
+        Packet: [4B length][telemetry JSON][JPEG bytes]
         """
         try:
             telem_len  = struct.unpack('>I', data[:4])[0]
-            
-            # Sanity check on telemetry length
-            if telem_len > 10000 or telem_len <= 0:
-                print(f"[ERROR] Invalid telemetry length: {telem_len}")
+            if telem_len <= 0 or telem_len > 10000:
                 return None, {}
-                
+
             telem_json = data[4:4 + telem_len].decode('utf-8')
-            
-            # Clean NaN and Infinity which JSON doesn't support
             telem_json = telem_json.replace('Infinity', '999')
             telem_json = telem_json.replace('NaN', '0')
-            
             telemetry  = json.loads(telem_json)
-            jpeg_data  = data[4 + telem_len:]
-            np_arr     = np.frombuffer(jpeg_data, dtype=np.uint8)
+
+            jpeg_data = data[4 + telem_len:]
+            np_arr    = np.frombuffer(
+                jpeg_data, dtype=np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
             return frame, telemetry
+
         except Exception as e:
             print(f"[ERROR] decode_frame: {e}")
-            # Print raw telemetry for debugging
-            try:
-                telem_len = struct.unpack('>I', data[:4])[0]
-                raw = data[4:4 + min(telem_len, 200)].decode(
-                    'utf-8', errors='replace')
-                print(f"[DEBUG] Raw telemetry: {raw}")
-            except:
-                pass
             return None, {}
-        # try:
-        #     telem_len  = struct.unpack('>I', data[:4])[0]
-        #     telem_json = data[4:4 + telem_len].decode('utf-8')
-        #     telemetry  = json.loads(telem_json)
-        #     jpeg_data  = data[4 + telem_len:]
-        #     np_arr     = np.frombuffer(
-        #         jpeg_data, dtype=np.uint8)
-        #     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        #     return frame, telemetry
-        # except Exception as e:
-        #     print(f"[ERROR] decode_frame: {e}")
-        #     return None, {}
 
     def run_detection(self, frame):
         """Run YOLOv8 inference. Returns detections + ms."""
@@ -161,8 +160,8 @@ class PerceptionServer:
             verbose=False, device='cuda')
 
         inference_ms = (time.perf_counter() - t_start) * 1000
-        detections = []
-        result = results[0]
+        detections   = []
+        result       = results[0]
 
         if result.boxes is not None:
             for box in result.boxes:
@@ -195,7 +194,7 @@ class PerceptionServer:
         return detections, inference_ms
 
     def draw_detections(self, frame, detections):
-        """Draw YOLOv8 bounding boxes on frame."""
+        """Draw YOLOv8 bounding boxes."""
         for det in detections:
             bbox     = det["bbox"]
             class_id = det["class_id"]
@@ -205,24 +204,26 @@ class PerceptionServer:
             x1, y1 = int(bbox["x1"]), int(bbox["y1"])
             x2, y2 = int(bbox["x2"]), int(bbox["y2"])
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2),
-                          color, 2)
+            cv2.rectangle(frame, (x1, y1),
+                          (x2, y2), color, 2)
             label = (f"{det['class_name']} "
                      f"{det['confidence']:.2f}")
             sz = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                label, cv2.FONT_HERSHEY_SIMPLEX,
+                0.5, 1)[0]
             cv2.rectangle(frame,
                 (x1, y1 - sz[1] - 8),
                 (x1 + sz[0], y1), color, -1)
-            cv2.putText(frame, label, (x1, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 0, 0), 1)
+            cv2.putText(frame, label,
+                (x1, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5, (0, 0, 0), 1)
         return frame
 
     def draw_overlay(self, frame, detections, telemetry,
                      inference_ms, current_fps,
                      lane_offset, lane_detected, control):
-        """Draw telemetry, stats and control overlay."""
+        """Draw telemetry and stats overlay."""
         speed    = telemetry.get("speed", 0)
         steering = telemetry.get("steering", 0)
         gear     = telemetry.get("gear", 0)
@@ -249,7 +250,7 @@ class PerceptionServer:
             0.7, (0, 255, 0) if lane_detected
             else (0, 0, 255), 2)
         cv2.putText(frame,
-            f"AI Steer:{control['steering']:+.3f} | "
+            f"AI: Steer:{control['steering']:+.3f} | "
             f"Thr:{control['throttle']:.2f} | "
             f"Brk:{control['brake']:.2f}",
             (20, 180), cv2.FONT_HERSHEY_SIMPLEX,
@@ -259,16 +260,7 @@ class PerceptionServer:
     def send_payload(self, detections, telemetry,
                      inference_ms, lane_offset,
                      lane_detected, scene_state, control):
-        """
-        Send single JSON payload to Unity containing:
-        - YOLOv8 detections
-        - Lane detection result
-        - Kalman fusion scene state
-        - Autonomous control signals
-
-        All embedded in one packet so Unity parses
-        a single JSON and extracts control signals directly.
-        """
+        """Send single JSON payload to Unity."""
         payload = {
             "frame_id":        self.frame_count,
             "inference_ms":    round(inference_ms, 2),
@@ -290,19 +282,13 @@ class PerceptionServer:
 
         try:
             data = json.dumps(payload).encode('utf-8')
-            print(f"[DEBUG] Packet size: {len(data)} bytes")
-            if len(data) > 65535:
-                print(f"[ERROR] Packet too large: {len(data)} bytes — truncating")
-            self.send_socket.sendto(data, (UNITY_IP, SEND_PORT))
+            self.send_socket.sendto(
+                data, (UNITY_IP, SEND_PORT))
         except Exception as e:
             print(f"[ERROR] send_payload: {e}")
 
     def run(self):
-        """
-        Main server loop:
-        Receive → Decode → Detect → Lane →
-        Fuse → Control → Send → Preview
-        """
+        """Main server loop."""
         self.running = True
         print("\n[PerceptionServer] Server running.")
         print(f"[PerceptionServer] Preview: {PREVIEW_PATH}")
@@ -315,7 +301,20 @@ class PerceptionServer:
 
         while self.running:
             try:
-                # ── RECEIVE ────────────────────────────────
+                # ── RECEIVE STEREO FRAME ────────────────────
+                try:
+                    stereo_data, _ = \
+                        self.stereo_socket.recvfrom(
+                            BUFFER_SIZE)
+                    stereo_arr = np.frombuffer(
+                        stereo_data, dtype=np.uint8)
+                    self.stereo_frame = cv2.imdecode(
+                        stereo_arr, cv2.IMREAD_COLOR)
+                except (socket.timeout,
+                        TimeoutError, OSError):
+                    pass
+
+                # ── RECEIVE MAIN FRAME ──────────────────────
                 data, addr = self.recv_socket.recvfrom(
                     BUFFER_SIZE)
 
@@ -332,6 +331,26 @@ class PerceptionServer:
                 lane_frame, lane_offset, lane_detected = \
                     self.lane_detector.detect(frame.copy())
 
+                # ── STEREO DEPTH ───────────────────────────
+                depth_map = None
+                depth_vis = None
+                if self.stereo_frame is not None:
+                    depth_map, depth_vis, _ = \
+                        self.stereo.compute(
+                            frame, self.stereo_frame)
+
+                    if (self.frame_count % 30 == 0
+                            and detections):
+                        det_depths = \
+                            self.stereo.get_detection_depths(
+                                depth_map, detections)
+                        for det, d in det_depths[:3]:
+                            if d:
+                                print(
+                                    f"  Stereo: "
+                                    f"{det['class_name']}"
+                                    f" @ {d:.1f}m")
+
                 # ── SENSOR FUSION ──────────────────────────
                 confirmed_tracks, scene_state = \
                     self.fusion.update(detections, telemetry)
@@ -339,6 +358,10 @@ class PerceptionServer:
                 # ── AUTONOMOUS CONTROL ─────────────────────
                 control = self.controller.compute(
                     scene_state, lane_offset, lane_detected)
+
+                # ── BEV MINIMAP ────────────────────────────
+                bev_map = self.bev.create_minimap(
+                    detections, confirmed_tracks, frame)
 
                 # ── SEND TO UNITY ──────────────────────────
                 self.send_payload(
@@ -366,7 +389,24 @@ class PerceptionServer:
                     vis = self.draw_overlay(
                         vis, detections, telemetry,
                         inference_ms, current_fps,
-                        lane_offset, lane_detected, control)
+                        lane_offset, lane_detected,
+                        control)
+
+                    # BEV minimap — bottom right
+                    h, w = vis.shape[:2]
+                    bev_r = cv2.resize(bev_map, (200, 260))
+                    bh, bw = bev_r.shape[:2]
+                    vis[h-bh-10:h-10,
+                        w-bw-10:w-10] = bev_r
+
+                    # Depth map — bottom left
+                    if depth_vis is not None:
+                        dv = cv2.resize(
+                            depth_vis, (200, 113))
+                        dh, dw = dv.shape[:2]
+                        vis[h-dh-10:h-10,
+                            10:10+dw] = dv
+
                     cv2.imwrite(PREVIEW_PATH,
                         cv2.resize(vis, (960, 540)))
 
@@ -377,31 +417,38 @@ class PerceptionServer:
                     speed   = telemetry.get("speed", 0)
                     closest = scene_state.get(
                         "closest_vehicle_distance", 999)
+                    stereo_str = (
+                        "OK" if self.stereo_frame
+                        is not None else "NO")
                     print(
                         f"[Frame {self.frame_count:05d}] "
                         f"FPS:{current_fps:.1f} | "
                         f"Inf:{inference_ms:.1f}ms"
                         f"(avg:{avg_inf:.1f}) | "
                         f"Det:{len(detections)} | "
-                        f"Tracks:{scene_state.get('total_tracked',0)} | "
+                        f"Tracks:{scene_state.get('total_tracked', 0)} | "
                         f"Closest:{closest:.1f}m | "
                         f"Steer:{control['steering']:+.3f} | "
                         f"Thr:{control['throttle']:.2f} | "
                         f"Brk:{control['brake']:.2f} | "
+                        f"Stereo:{stereo_str} | "
                         f"Speed:{speed:.1f}m/s")
 
-            except (socket.timeout, TimeoutError, OSError):
+            except (socket.timeout,
+                    TimeoutError, OSError):
                 print("[PerceptionServer] "
                       "Waiting for Unity connection...")
                 continue
 
             except KeyboardInterrupt:
-                print("\n[PerceptionServer] Shutting down...")
+                print(
+                    "\n[PerceptionServer] Shutting down...")
                 self.running = False
 
         # ── CLEANUP ────────────────────────────────────────
         self.recv_socket.close()
         self.send_socket.close()
+        self.stereo_socket.close()
 
         total_time = time.time() - session_start
         avg_inf    = (self.total_inference_time

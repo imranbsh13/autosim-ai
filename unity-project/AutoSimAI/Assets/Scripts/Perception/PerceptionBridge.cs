@@ -8,16 +8,17 @@ using UnityEngine;
 /// <summary>
 /// Bridges Unity camera frames and vehicle telemetry to the
 /// Python perception server over UDP.
-/// Sends: JPEG frame + telemetry JSON on port 5006
+/// Sends: RGB frame + telemetry on port 5006
+///        Stereo frame on port 5009
 /// Receives: detection + control JSON on port 5008
 /// Applies autonomous control signals to RCC vehicle.
 /// </summary>
 public class PerceptionBridge : MonoBehaviour
 {
     [Header("Network Settings")]
-    public string pythonIP   = "127.0.0.1";
-    public int sendPort      = 5006;
-    public int receivePort   = 5008;
+    public string pythonIP  = "127.0.0.1";
+    public int sendPort     = 5006;
+    public int receivePort  = 5008;
 
     [Header("Camera")]
     public Camera perceptionCamera;
@@ -25,35 +26,43 @@ public class PerceptionBridge : MonoBehaviour
     public int captureHeight = 360;
     public int jpegQuality   = 80;
 
+    [Header("Stereo Camera")]
+    public Camera stereoCamera;
+    public int stereoSendPort = 5009;
+
     [Header("Capture Settings")]
-    public int captureEveryNFrames = 6;
+    public int  captureEveryNFrames = 6;
     public bool sendFrames = true;
 
     [Header("Vehicle Reference")]
     public GameObject playerVehicle;
 
     [Header("Autonomous Control")]
-    public bool autonomousEnabled  = false;
-    public float steeringSmoothing = 0.3f;
-    public float throttleSmoothing = 0.5f;
+    public bool  autonomousEnabled  = false;
+    public float steeringSmoothing  = 0.3f;
+    public float throttleSmoothing  = 0.5f;
 
     // ── NETWORK ──────────────────────────────────────────
-    private UdpClient sendClient;
-    private UdpClient receiveClient;
+    private UdpClient  sendClient;
+    private UdpClient  stereoSendClient;
+    private UdpClient  receiveClient;
     private IPEndPoint pythonEndPoint;
+    private IPEndPoint stereoPythonEndPoint;
 
-    // ── RENDER TEXTURE ───────────────────────────────────
+    // ── RENDER TEXTURES ───────────────────────────────────
     private RenderTexture captureRT;
-    private Texture2D captureTexture;
+    private Texture2D     captureTexture;
+    private RenderTexture stereoCaptureRT;
+    private Texture2D     stereoCaptureTexture;
 
     // ── STATE ────────────────────────────────────────────
-    private int frameCount = 0;
-    private bool isRunning = false;
+    private int  frameCount = 0;
+    private bool isRunning  = false;
 
     // ── VEHICLE TELEMETRY ─────────────────────────────────
-    private float vehicleSpeed     = 0f;
-    private float vehicleSteering  = 0f;
-    private int   vehicleGear      = 0;
+    private float   vehicleSpeed    = 0f;
+    private float   vehicleSteering = 0f;
+    private int     vehicleGear     = 0;
     private Vector3 vehiclePosition = Vector3.zero;
 
     // ── AUTONOMOUS CONTROL (from Python) ─────────────────
@@ -62,7 +71,7 @@ public class PerceptionBridge : MonoBehaviour
     private float targetBrake    = 0f;
     private bool  emergencyBrake = false;
 
-    // Smoothed values applied to vehicle
+    // Smoothed values
     private float smoothedSteering = 0f;
     private float smoothedThrottle = 0f;
     private float smoothedBrake    = 0f;
@@ -116,13 +125,13 @@ public class PerceptionBridge : MonoBehaviour
     [Serializable]
     public class PerceptionResult
     {
-        public int        frame_id;
-        public float      inference_ms;
-        public int        detection_count;
+        public int          frame_id;
+        public float        inference_ms;
+        public int          detection_count;
         public Detection[]  detections;
-        public float      lane_offset;
-        public bool       lane_detected;
-        public SceneState scene_state;
+        public float        lane_offset;
+        public bool         lane_detected;
+        public SceneState   scene_state;
         public ControlSignals control;
     }
 
@@ -131,7 +140,7 @@ public class PerceptionBridge : MonoBehaviour
     void Start()
     {
         InitialiseNetwork();
-        InitialiseRenderTexture();
+        InitialiseRenderTextures();
         isRunning = true;
         Debug.Log("[PerceptionBridge] Started → " +
                   pythonIP + ":" + sendPort);
@@ -141,27 +150,24 @@ public class PerceptionBridge : MonoBehaviour
     {
         UpdateTelemetry();
 
-        // Send frame every N frames
         frameCount++;
-        if (sendFrames && frameCount % captureEveryNFrames == 0)
+        if (sendFrames &&
+            frameCount % captureEveryNFrames == 0)
             StartCoroutine(CaptureAndSend());
 
-        // Non-blocking receive check every frame
         TryReceive();
 
-        // Apply autonomous control if enabled
         if (autonomousEnabled)
             ApplyAutonomousControl();
 
-        // Debug log every 60 frames
-        if (frameCount % 60 == 0)
+        if (frameCount % 120 == 0)
         {
             Debug.Log(
                 $"[PerceptionBridge] " +
                 $"HasResult:{latestResult != null} | " +
-                $"Throttle:{targetThrottle:F2} | " +
+                $"Thr:{targetThrottle:F2} | " +
                 $"Steer:{targetSteering:F2} | " +
-                $"Brake:{targetBrake:F2}");
+                $"Brk:{targetBrake:F2}");
         }
     }
 
@@ -169,9 +175,17 @@ public class PerceptionBridge : MonoBehaviour
     {
         isRunning = false;
         sendClient?.Close();
+        stereoSendClient?.Close();
         receiveClient?.Close();
+
         if (captureRT != null) captureRT.Release();
-        if (captureTexture != null) Destroy(captureTexture);
+        if (captureTexture != null)
+            Destroy(captureTexture);
+        if (stereoCaptureRT != null)
+            stereoCaptureRT.Release();
+        if (stereoCaptureTexture != null)
+            Destroy(stereoCaptureTexture);
+
         Debug.Log("[PerceptionBridge] Stopped.");
     }
 
@@ -179,12 +193,17 @@ public class PerceptionBridge : MonoBehaviour
 
     void InitialiseNetwork()
     {
-        // Send client — sends frames to Python
-        sendClient    = new UdpClient();
+        // Main send client
+        sendClient     = new UdpClient();
         pythonEndPoint = new IPEndPoint(
             IPAddress.Parse(pythonIP), sendPort);
 
-        // Receive client — non-blocking, polls in Update()
+        // Stereo send client
+        stereoSendClient      = new UdpClient();
+        stereoPythonEndPoint  = new IPEndPoint(
+            IPAddress.Parse(pythonIP), stereoSendPort);
+
+        // Receive client — non-blocking
         receiveClient = new UdpClient(receivePort);
         receiveClient.Client.Blocking = false;
 
@@ -192,12 +211,12 @@ public class PerceptionBridge : MonoBehaviour
                   "Receiving on port " + receivePort);
     }
 
-    void InitialiseRenderTexture()
+    void InitialiseRenderTextures()
     {
+        // Main RGB camera
         captureRT = new RenderTexture(
             captureWidth, captureHeight, 24,
             RenderTextureFormat.ARGB32);
-
         captureTexture = new Texture2D(
             captureWidth, captureHeight,
             TextureFormat.RGB24, false);
@@ -206,7 +225,21 @@ public class PerceptionBridge : MonoBehaviour
             perceptionCamera.targetTexture = captureRT;
         else
             Debug.LogWarning(
-                "[PerceptionBridge] No camera assigned!");
+                "[PerceptionBridge] No main camera!");
+
+        // Stereo camera
+        stereoCaptureRT = new RenderTexture(
+            captureWidth, captureHeight, 24,
+            RenderTextureFormat.ARGB32);
+        stereoCaptureTexture = new Texture2D(
+            captureWidth, captureHeight,
+            TextureFormat.RGB24, false);
+
+        if (stereoCamera != null)
+            stereoCamera.targetTexture = stereoCaptureRT;
+        else
+            Debug.LogWarning(
+                "[PerceptionBridge] No stereo camera!");
     }
 
     // ── TELEMETRY ────────────────────────────────────────
@@ -225,7 +258,8 @@ public class PerceptionBridge : MonoBehaviour
         }
         else
         {
-            var rb = playerVehicle.GetComponent<Rigidbody>();
+            var rb = playerVehicle
+                .GetComponent<Rigidbody>();
             if (rb != null)
                 vehicleSpeed = rb.linearVelocity.magnitude;
         }
@@ -236,11 +270,8 @@ public class PerceptionBridge : MonoBehaviour
 
     void TryReceive()
     {
-        
         try
         {
-            // Available > 0 means data is waiting
-            // Non-blocking so no waiting if nothing there
             while (receiveClient.Available > 0)
             {
                 IPEndPoint remote = new IPEndPoint(
@@ -249,10 +280,6 @@ public class PerceptionBridge : MonoBehaviour
                     ref remote);
                 string json = Encoding.UTF8.GetString(data);
 
-                Debug.Log(
-                    $"[PerceptionBridge] Received " +
-                    $"{data.Length} bytes from Python");
-
                 PerceptionResult result =
                     JsonUtility.FromJson<PerceptionResult>(
                         json);
@@ -260,38 +287,28 @@ public class PerceptionBridge : MonoBehaviour
                 latestResult = result;
                 latestJson   = json;
 
-                Debug.Log("[PerceptionBridge] JSON preview: " + 
-          json.Substring(0, Mathf.Min(300, json.Length)));
-
-                // Apply control signals if autonomous enabled
                 if (result != null &&
                     result.control != null &&
                     autonomousEnabled)
                 {
-                    targetSteering = result.control.steering;
-                    targetThrottle = result.control.throttle;
-                    targetBrake    = result.control.brake;
+                    targetSteering =
+                        result.control.steering;
+                    targetThrottle =
+                        result.control.throttle;
+                    targetBrake =
+                        result.control.brake;
                     emergencyBrake =
                         result.control.emergency_brake;
-
-                    Debug.Log(
-                        $"[PerceptionBridge] Control → " +
-                        $"Steer:{targetSteering:F3} | " +
-                        $"Thr:{targetThrottle:F2} | " +
-                        $"Brk:{targetBrake:F2}");
                 }
             }
         }
         catch (SocketException se)
         {
-            // WouldBlock = no data available, normal
             if (se.SocketErrorCode !=
                 SocketError.WouldBlock)
-            {
                 Debug.LogWarning(
                     "[PerceptionBridge] Socket: " +
                     se.Message);
-            }
         }
         catch (Exception e)
         {
@@ -301,7 +318,7 @@ public class PerceptionBridge : MonoBehaviour
         }
     }
 
-    // ── AUTONOMOUS CONTROL APPLICATION ───────────────────
+    // ── AUTONOMOUS CONTROL ───────────────────────────────
 
     void ApplyAutonomousControl()
     {
@@ -311,11 +328,9 @@ public class PerceptionBridge : MonoBehaviour
             .GetComponent<RCC_CarControllerV3>();
         if (rcc == null) return;
 
-        // Ensure engine is running
         if (!rcc.engineRunning)
             rcc.StartEngine();
 
-        // Smooth control signals
         smoothedSteering = Mathf.Lerp(
             smoothedSteering, targetSteering,
             steeringSmoothing);
@@ -326,24 +341,11 @@ public class PerceptionBridge : MonoBehaviour
             smoothedBrake, targetBrake,
             throttleSmoothing);
 
-        // Apply to RCC
         rcc.externalController = true;
         rcc.gasInput           = smoothedThrottle;
         rcc.brakeInput         = smoothedBrake;
         rcc.steerInput         = smoothedSteering;
         rcc.handbrakeInput     = 0f;
-
-        // Debug every 60 frames
-        if (frameCount % 60 == 0)
-        {
-            Debug.Log(
-                $"[PerceptionBridge] RCC Applied → " +
-                $"Gas:{rcc.gasInput:F2} | " +
-                $"Brake:{rcc.brakeInput:F2} | " +
-                $"Steer:{rcc.steerInput:F2} | " +
-                $"Engine:{rcc.engineRunning} | " +
-                $"Speed:{rcc.speed:F1}");
-        }
     }
 
     // ── CAPTURE AND SEND ─────────────────────────────────
@@ -352,47 +354,78 @@ public class PerceptionBridge : MonoBehaviour
     {
         yield return new WaitForEndOfFrame();
 
-        if (perceptionCamera == null || captureRT == null)
-            yield break;
-
-        RenderTexture.active = captureRT;
-        captureTexture.ReadPixels(
-            new Rect(0, 0, captureWidth, captureHeight),
-            0, 0);
-        captureTexture.Apply();
-        RenderTexture.active = null;
-
-        byte[] jpegBytes     = captureTexture.EncodeToJPG(
-            jpegQuality);
-        string telemetryJson = BuildTelemetryJson();
-        byte[] telemetryBytes = Encoding.UTF8.GetBytes(
-            telemetryJson);
-
-        int    len    = telemetryBytes.Length;
-        byte[] packet = new byte[
-            4 + len + jpegBytes.Length];
-
-        // Big-endian uint32 header
-        packet[0] = (byte)((len >> 24) & 0xFF);
-        packet[1] = (byte)((len >> 16) & 0xFF);
-        packet[2] = (byte)((len >> 8)  & 0xFF);
-        packet[3] = (byte)((len)       & 0xFF);
-
-        Buffer.BlockCopy(
-            telemetryBytes, 0, packet, 4, len);
-        Buffer.BlockCopy(
-            jpegBytes, 0, packet,
-            4 + len, jpegBytes.Length);
-
-        try
+        // ── MAIN RGB FRAME ────────────────────────────────
+        if (perceptionCamera != null && captureRT != null)
         {
-            sendClient.Send(
-                packet, packet.Length, pythonEndPoint);
+            RenderTexture.active = captureRT;
+            captureTexture.ReadPixels(
+                new Rect(0, 0,
+                    captureWidth, captureHeight),
+                0, 0);
+            captureTexture.Apply();
+            RenderTexture.active = null;
+
+            byte[] jpegBytes = captureTexture
+                .EncodeToJPG(jpegQuality);
+            string telemetryJson = BuildTelemetryJson();
+            byte[] telemetryBytes = Encoding.UTF8
+                .GetBytes(telemetryJson);
+
+            int    len    = telemetryBytes.Length;
+            byte[] packet = new byte[
+                4 + len + jpegBytes.Length];
+
+            packet[0] = (byte)((len >> 24) & 0xFF);
+            packet[1] = (byte)((len >> 16) & 0xFF);
+            packet[2] = (byte)((len >> 8)  & 0xFF);
+            packet[3] = (byte)((len)       & 0xFF);
+
+            Buffer.BlockCopy(
+                telemetryBytes, 0, packet, 4, len);
+            Buffer.BlockCopy(
+                jpegBytes, 0, packet,
+                4 + len, jpegBytes.Length);
+
+            try
+            {
+                sendClient.Send(packet, packet.Length,
+                                pythonEndPoint);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    "[PerceptionBridge] Send: " +
+                    e.Message);
+            }
         }
-        catch (Exception e)
+
+        // ── STEREO FRAME ──────────────────────────────────
+        if (stereoCamera != null &&
+            stereoCaptureRT != null)
         {
-            Debug.LogWarning(
-                "[PerceptionBridge] Send: " + e.Message);
+            RenderTexture.active = stereoCaptureRT;
+            stereoCaptureTexture.ReadPixels(
+                new Rect(0, 0,
+                    captureWidth, captureHeight),
+                0, 0);
+            stereoCaptureTexture.Apply();
+            RenderTexture.active = null;
+
+            byte[] stereoJpeg = stereoCaptureTexture
+                .EncodeToJPG(jpegQuality);
+
+            try
+            {
+                stereoSendClient.Send(
+                    stereoJpeg, stereoJpeg.Length,
+                    stereoPythonEndPoint);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    "[PerceptionBridge] Stereo: " +
+                    e.Message);
+            }
         }
     }
 
@@ -403,12 +436,14 @@ public class PerceptionBridge : MonoBehaviour
         float pz = vehiclePosition.z;
 
         return "{" +
-            "\"speed\":"    + vehicleSpeed.ToString("F2")    + "," +
-            "\"steering\":" + vehicleSteering.ToString("F3") + "," +
-            "\"gear\":"     + vehicleGear                    + "," +
-            "\"pos_x\":"    + px.ToString("F2")              + "," +
-            "\"pos_y\":"    + py.ToString("F2")              + "," +
-            "\"pos_z\":"    + pz.ToString("F2")              +
+            "\"speed\":"    +
+            vehicleSpeed.ToString("F2")    + "," +
+            "\"steering\":" +
+            vehicleSteering.ToString("F3") + "," +
+            "\"gear\":"     + vehicleGear  + "," +
+            "\"pos_x\":"    + px.ToString("F2") + "," +
+            "\"pos_y\":"    + py.ToString("F2") + "," +
+            "\"pos_z\":"    + pz.ToString("F2") +
             "}";
     }
 
@@ -435,7 +470,8 @@ public class PerceptionBridge : MonoBehaviour
             smoothedBrake    = 0f;
         }
 
-        Debug.Log("[PerceptionBridge] Autonomous: " + enable);
+        Debug.Log("[PerceptionBridge] Autonomous: " +
+                  enable);
     }
 
     public PerceptionResult GetLatestResult() =>
@@ -452,9 +488,9 @@ public class PerceptionBridge : MonoBehaviour
     {
         if (!Application.isPlaying) return;
 
-        GUIStyle style    = new GUIStyle(GUI.skin.label);
-        style.fontSize    = 14;
-        style.richText    = true;
+        GUIStyle style = new GUIStyle(GUI.skin.label);
+        style.fontSize  = 14;
+        style.richText  = true;
         style.normal.textColor = Color.white;
 
         string modeStr = autonomousEnabled
