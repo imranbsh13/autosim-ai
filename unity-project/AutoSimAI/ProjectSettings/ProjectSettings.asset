@@ -824,7 +824,7 @@ PlayerSettings:
   webWasm2023: 0
   scriptingDefineSymbols:
     Android: BCG_RCC
-    Standalone: BCG_RCC
+    Standalone: BCG_RCC;SENTIS_ANALYTICS_ENABLED
     WebGL: BCG_RCC
     iPhone: BCG_RCC
   additionalCompilerArguments: {}

@@ -489,7 +489,7 @@ public class PerceptionBridge : MonoBehaviour
         if (!Application.isPlaying) return;
 
         GUIStyle style = new GUIStyle(GUI.skin.label);
-        style.fontSize  = 14;
+        style.fontSize  = 22;
         style.richText  = true;
         style.normal.textColor = Color.white;
 
