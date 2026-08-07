@@ -11,7 +11,7 @@ https://github.com/imranbsh13/autosim-ai/releases/download/v1.0/Autosim.AI.Demo.
 
 *Autonomous driving pipeline — YOLOv8 detection (green/red boxes), lane keeping (blue/red lines), Kalman fusion tracking, BEV minimap (bottom right), stereo depth map (bottom left). Running at 10-12 FPS on RTX 4070 Laptop.*
 
-![AutoSim AI Demo](docs/preview.png)
+![AutoSim AI Demo](docs/preview.jpg)
 
 ---
 
