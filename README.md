@@ -4,14 +4,13 @@
 
 Built as an independent portfolio project targeting Computer Vision, Perception Engineering, and AI Engineer roles. Demonstrates a complete end-to-end pipeline — from synthetic training data generation through deep learning model training, real-time sensor fusion, autonomous control logic, and on-device VR deployment on Oculus Quest 2.
 
-> **Live demo:** Oculus Quest 2 APK running YOLOv8 at 8.4ms on-device via Unity Sentis — no Python server, no cloud, fully standalone.
 ## Demo
 
 https://github.com/imranbsh13/autosim-ai/releases/download/v1.0/Autosim.AI.Demo.mp4
 
 *Autonomous driving pipeline — YOLOv8 detection (green/red boxes), lane keeping (blue/red lines), Kalman fusion tracking, BEV minimap (bottom right), stereo depth map (bottom left). Running at 10-12 FPS on RTX 4070 Laptop.*
 
-![AutoSim AI Demo](docs/preview.jpg)
+![AutoSim AI Demo](https://raw.githubusercontent.com/imranbsh13/autosim-ai/main/docs/preview.jpg)
 
 ---
 
@@ -200,11 +199,10 @@ Quest 2's Snapdragon XR2 cannot run HDRP. URP supports all three asset packages 
 
 | Limitation | Planned fix |
 |---|---|
-| Pedestrian recall 0.60         | Collect closer-range pedestrian footage      |
-| Traffic sign/light detection   | Label signs in Unity scene, retrain          |
-| Lane detection fails on curves | Upgrade to segmentation-based lane model     |
-| Stereo depth on Quest 2        | Port StereoDepth pipeline to Unity Sentis    |
-
+| Pedestrian recall 0.60 | Collect closer-range pedestrian footage |
+| Traffic sign/light detection | Label signs in Unity scene, retrain |
+| Lane detection on curves | Upgrade to segmentation-based lane model |
+| Stereo depth on Quest 2 | Port StereoDepth pipeline to Unity Sentis C# |
 
 ---
 
